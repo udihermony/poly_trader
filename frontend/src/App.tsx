@@ -1,5 +1,5 @@
 import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
-import { Home, Settings, TrendingUp, History, BarChart3, Trophy, Percent, Wallet } from 'lucide-react';
+import { Home, Settings, TrendingUp, History, BarChart3, Trophy, Percent, Wallet, Bot, DollarSign } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import MarketConfig from './pages/MarketConfig';
 import TradeHistory from './pages/TradeHistory';
@@ -7,15 +7,19 @@ import SettingsPage from './pages/Settings';
 import Leaderboard from './pages/Leaderboard';
 import Arbitrage from './pages/Arbitrage';
 import Account from './pages/Account';
+import AITrading from './pages/AITrading';
+import Trade from './pages/Trade';
 
 function Navigation() {
   const location = useLocation();
 
   const navItems = [
     { path: '/', label: 'Dashboard', icon: Home },
+    { path: '/trade', label: 'Trade', icon: DollarSign },
     { path: '/markets', label: 'Markets', icon: TrendingUp },
     { path: '/leaderboard', label: 'Top Traders', icon: Trophy },
     { path: '/arbitrage', label: 'Arbitrage', icon: Percent },
+    { path: '/ai-trading', label: 'AI Trading', icon: Bot },
     { path: '/history', label: 'History', icon: History },
     { path: '/account', label: 'Account', icon: Wallet },
     { path: '/settings', label: 'Settings', icon: Settings },
@@ -63,9 +67,11 @@ function App() {
         <main className="container mx-auto px-4 py-8">
           <Routes>
             <Route path="/" element={<Dashboard />} />
+            <Route path="/trade" element={<Trade />} />
             <Route path="/markets" element={<MarketConfig />} />
             <Route path="/leaderboard" element={<Leaderboard />} />
             <Route path="/arbitrage" element={<Arbitrage />} />
+            <Route path="/ai-trading" element={<AITrading />} />
             <Route path="/history" element={<TradeHistory />} />
             <Route path="/account" element={<Account />} />
             <Route path="/settings" element={<SettingsPage />} />

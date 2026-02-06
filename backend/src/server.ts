@@ -15,6 +15,7 @@ import leaderboardRoutes from './routes/leaderboard.routes';
 import snipeRoutes from './routes/snipe.routes';
 import spreadRoutes from './routes/spread.routes';
 import accountRoutes from './routes/account.routes';
+import tradeRoutes from './routes/trade.routes';
 
 // Import services
 import { tradingService } from './services/trading.service';
@@ -56,6 +57,7 @@ app.use('/api/leaderboard', leaderboardRoutes);
 app.use('/api/snipe', snipeRoutes);
 app.use('/api/spread', spreadRoutes);
 app.use('/api/account', accountRoutes);
+app.use('/api/trade', tradeRoutes);
 
 // Error handling
 app.use(notFound);

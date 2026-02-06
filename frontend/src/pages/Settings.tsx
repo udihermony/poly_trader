@@ -12,6 +12,7 @@ export default function Settings() {
     polymarket_secret: '',
     polymarket_passphrase: '',
     polymarket_funder_address: '',
+    polymarket_private_key: '',
     claude_api_key: '',
     gemini_api_key: '',
     local_llm_url: '',
@@ -22,6 +23,7 @@ export default function Settings() {
     hasClaudeApiKey: false,
     hasGeminiApiKey: false,
     hasLocalLLM: false,
+    hasPrivateKey: false,
     localLLMUrl: '',
   });
 
@@ -133,6 +135,7 @@ export default function Settings() {
         polymarket_secret: '',
         polymarket_passphrase: '',
         polymarket_funder_address: '',
+        polymarket_private_key: '',
         claude_api_key: '',
         gemini_api_key: '',
         local_llm_url: '',
@@ -292,6 +295,24 @@ export default function Settings() {
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
               placeholder="0x..."
             />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Wallet Private Key (for signing trades)
+            </label>
+            <input
+              type="password"
+              value={credentials.polymarket_private_key}
+              onChange={(e) =>
+                setCredentials({ ...credentials, polymarket_private_key: e.target.value })
+              }
+              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder={hasCredentials.hasPrivateKey ? '••••••••' : '0x... or 64 hex characters'}
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              Required for real trading. Stored locally in .env file, never sent to any server.
+            </p>
           </div>
 
           <div>

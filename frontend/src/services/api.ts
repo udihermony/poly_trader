@@ -114,4 +114,13 @@ export const accountApi = {
   getPnl: () => api.get('/account/pnl'),
 };
 
+// Manual Trade endpoints
+export const tradeApi = {
+  search: (query: string) => api.get('/trade/search', { params: { q: query } }),
+  trending: () => api.get('/trade/trending'),
+  getMarket: (marketId: string) => api.get(`/trade/market/${marketId}`),
+  execute: (data: { marketId: string; tokenId: string; outcome: string; amount: number }) =>
+    api.post('/trade/execute', data),
+};
+
 export default api;

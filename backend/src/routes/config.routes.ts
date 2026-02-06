@@ -2,8 +2,41 @@ import { Router } from 'express';
 import { queries } from '../config/database';
 import { AppError } from '../middleware/error.middleware';
 import { tradingService } from '../services/trading.service';
+import fs from 'fs';
+import path from 'path';
 
 const router = Router();
+
+// Helper to read/write private key from .env file
+const ENV_PATH = path.join(__dirname, '../../.env');
+
+function getPrivateKeyFromEnv(): string | null {
+  try {
+    if (!fs.existsSync(ENV_PATH)) return null;
+    const content = fs.readFileSync(ENV_PATH, 'utf-8');
+    const match = content.match(/^POLYMARKET_PRIVATE_KEY=(.*)$/m);
+    return match && match[1] ? match[1].trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+function setPrivateKeyInEnv(privateKey: string): void {
+  let content = '';
+  if (fs.existsSync(ENV_PATH)) {
+    content = fs.readFileSync(ENV_PATH, 'utf-8');
+  }
+
+  if (content.includes('POLYMARKET_PRIVATE_KEY=')) {
+    content = content.replace(/^POLYMARKET_PRIVATE_KEY=.*$/m, `POLYMARKET_PRIVATE_KEY=${privateKey}`);
+  } else {
+    content = `POLYMARKET_PRIVATE_KEY=${privateKey}\n${content}`;
+  }
+
+  fs.writeFileSync(ENV_PATH, content);
+  // Update process.env as well
+  process.env.POLYMARKET_PRIVATE_KEY = privateKey;
+}
 
 // Get risk configuration
 router.get('/risk', (req, res, next) => {
@@ -68,12 +101,15 @@ router.put('/app', (req, res, next) => {
 router.get('/credentials', (req, res, next) => {
   try {
     const creds: any = queries.getCredentials.get();
+    const hasPrivateKey = !!getPrivateKeyFromEnv();
+
     if (!creds) {
       return res.json({
         success: true,
         data: {
           hasPolymarketCredentials: false,
           hasClaudeApiKey: false,
+          hasPrivateKey,
         },
       });
     }
@@ -85,6 +121,7 @@ router.get('/credentials', (req, res, next) => {
         hasClaudeApiKey: !!creds.claude_api_key,
         hasGeminiApiKey: !!creds.gemini_api_key,
         hasLocalLLM: !!creds.local_llm_url,
+        hasPrivateKey,
         funderAddress: creds.polymarket_funder_address,
         localLLMUrl: creds.local_llm_url,
       },
@@ -102,10 +139,16 @@ router.put('/credentials', async (req, res, next) => {
       polymarket_secret,
       polymarket_passphrase,
       polymarket_funder_address,
+      polymarket_private_key,
       claude_api_key,
       gemini_api_key,
       local_llm_url,
     } = req.body;
+
+    // Handle private key separately (stored in .env file, not database)
+    if (polymarket_private_key && polymarket_private_key.trim() !== '') {
+      setPrivateKeyInEnv(polymarket_private_key.trim());
+    }
 
     // Get existing credentials
     const existing: any = queries.getCredentials.get() || {};

@@ -2,6 +2,7 @@ import axios from 'axios';
 import { queries } from '../config/database';
 import { io } from '../server';
 import { riskService } from './risk.service';
+import { polymarketService } from './polymarket.service';
 
 const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
 
@@ -263,6 +264,8 @@ class SpreadService {
   ): Promise<any> {
     const opportunities: any[] = queries.getActiveSpreadOpportunities.all();
     const opp = opportunities.find((o: any) => o.id === opportunityId);
+    const appConfig: any = queries.getAppConfig.get();
+    const isPaperMode = appConfig?.paper_trading_mode === 1;
 
     if (!opp) {
       throw new Error('Opportunity not found or no longer active');
@@ -272,10 +275,102 @@ class SpreadService {
     const numOutcomes = outcomes.length;
     const sizePerOutcome = totalInvestment / numOutcomes;
 
-    // For paper trading, generate simulated order IDs
-    const orderIds = outcomes.map(
-      (_: string, i: number) => `PAPER_SPREAD_${Date.now()}_${i}`
-    );
+    let orderIds: string[] = [];
+    let isRealTrade = false;
+
+    if (!isPaperMode) {
+      // Attempt to place real orders
+      try {
+        if (!polymarketService.isInitialized()) {
+          await polymarketService.initialize();
+        }
+
+        // For SINGLE market spread (YES + NO on same market)
+        if (opp.opportunity_type === 'SINGLE' && opp.market_id) {
+          // Fetch market to get token IDs
+          const marketRes = await axios.get(`${GAMMA_API_BASE}/markets`, {
+            params: { id: opp.market_id, limit: 1 },
+          });
+
+          if (marketRes.data && marketRes.data.length > 0) {
+            const market = marketRes.data[0];
+            if (market.clobTokenIds) {
+              const tokenIds = typeof market.clobTokenIds === 'string'
+                ? JSON.parse(market.clobTokenIds)
+                : market.clobTokenIds;
+
+              // Place order for YES (token 0)
+              const yesOrder = await polymarketService.placeMarketOrder(
+                tokenIds[0],
+                'BUY',
+                sizePerOutcome
+              );
+              orderIds.push(yesOrder.orderID);
+              console.log(`[SPREAD][LIVE] YES order placed: ${yesOrder.orderID}`);
+
+              await this.sleep(500); // Small delay between orders
+
+              // Place order for NO (token 1)
+              const noOrder = await polymarketService.placeMarketOrder(
+                tokenIds[1],
+                'BUY',
+                sizePerOutcome
+              );
+              orderIds.push(noOrder.orderID);
+              console.log(`[SPREAD][LIVE] NO order placed: ${noOrder.orderID}`);
+
+              isRealTrade = true;
+            }
+          }
+        } else if (opp.opportunity_type === 'MULTI' && opp.event_id) {
+          // For MULTI-outcome events, we need to buy YES on each market
+          const eventRes = await axios.get(`${GAMMA_API_BASE}/events`, {
+            params: { id: opp.event_id, limit: 1 },
+          });
+
+          if (eventRes.data && eventRes.data.length > 0) {
+            const event = eventRes.data[0];
+            const markets = event.markets || [];
+
+            for (const market of markets) {
+              if (market.clobTokenIds) {
+                const tokenIds = typeof market.clobTokenIds === 'string'
+                  ? JSON.parse(market.clobTokenIds)
+                  : market.clobTokenIds;
+
+                // Buy YES on each market (token 0)
+                const order = await polymarketService.placeMarketOrder(
+                  tokenIds[0],
+                  'BUY',
+                  sizePerOutcome
+                );
+                orderIds.push(order.orderID);
+                console.log(`[SPREAD][LIVE] Multi-outcome YES order placed: ${order.orderID}`);
+
+                await this.sleep(500);
+              }
+            }
+
+            if (orderIds.length === markets.length) {
+              isRealTrade = true;
+            }
+          }
+        }
+      } catch (orderError: any) {
+        console.error(`[SPREAD] Failed to place real orders:`, orderError.message);
+        // Fall back to paper trade
+        orderIds = outcomes.map(
+          (_: string, i: number) => `PAPER_SPREAD_${Date.now()}_${i}`
+        );
+      }
+    }
+
+    // If still paper mode or real orders failed, generate simulated order IDs
+    if (isPaperMode || !isRealTrade) {
+      orderIds = outcomes.map(
+        (_: string, i: number) => `PAPER_SPREAD_${Date.now()}_${i}`
+      );
+    }
 
     const expectedProfit = (opp.spread_pct * totalInvestment) / (1 + opp.spread_pct);
 
@@ -296,7 +391,7 @@ class SpreadService {
       numOutcomes,
       totalInvestment,
       JSON.stringify(orderIds),
-      1 // is_paper_trade
+      isRealTrade ? 0 : 1 // is_paper_trade
     );
 
     // Track spending in budget
@@ -310,11 +405,14 @@ class SpreadService {
       totalInvestment,
       expectedProfit,
       spreadPct: opp.spread_pct,
+      orderIds,
+      isPaperTrade: !isRealTrade,
     };
 
+    const modeLabel = isRealTrade ? '[LIVE]' : '[PAPER]';
     io.emit('spread:trade_executed', trade);
     console.log(
-      `[SPREAD] Executed: ${opp.question.slice(0, 40)}... $${totalInvestment.toFixed(2)} invested, expected +$${expectedProfit.toFixed(2)}`
+      `[SPREAD]${modeLabel} Executed: ${opp.question.slice(0, 40)}... $${totalInvestment.toFixed(2)} invested, expected +$${expectedProfit.toFixed(2)}`
     );
 
     // Auto-start resolver so this trade gets checked for resolution

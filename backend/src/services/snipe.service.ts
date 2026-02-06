@@ -2,8 +2,10 @@ import axios from 'axios';
 import { queries } from '../config/database';
 import { io } from '../server';
 import { riskService } from './risk.service';
+import { polymarketService } from './polymarket.service';
 
 const DATA_API_BASE = 'https://data-api.polymarket.com';
+const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
 const CLOB_API_BASE = 'https://clob.polymarket.com';
 
 interface LeaderboardTrader {
@@ -110,9 +112,10 @@ class SnipeService {
    */
   async snipeTopPositions(): Promise<{ copied: number; skipped: number; positions: any[] }> {
     const riskConfig: any = queries.getRiskConfig.get();
+    const appConfig: any = queries.getAppConfig.get();
     const snipeSize = riskConfig?.snipe_size || 10;
     const profitTarget = riskConfig?.snipe_profit_target || 0.05;
-    const isPaperMode = riskConfig?.paper_trading_mode === 1;
+    const isPaperMode = appConfig?.paper_trading_mode === 1;
 
     const topPositions = await this.getTopPositions();
     let copied = 0;
@@ -127,20 +130,67 @@ class SnipeService {
         continue;
       }
 
-      // Get current price from CLOB
+      // Get market data to fetch token IDs and current price
+      let tokenId: string | null = null;
       let currentPrice = pos.avgPrice;
+
       try {
-        // We need the token ID to get current price
-        // For now, use the average price from the trader's activity
-        // In production, you'd fetch the actual order book price
+        // Fetch market data from Gamma API using condition_id
+        const marketRes = await axios.get(`${GAMMA_API_BASE}/markets`, {
+          params: { condition_id: pos.conditionId, limit: 1 },
+        });
+
+        if (marketRes.data && marketRes.data.length > 0) {
+          const market = marketRes.data[0];
+
+          // Get token IDs - clobTokenIds is [yesTokenId, noTokenId]
+          if (market.clobTokenIds) {
+            const tokenIds = typeof market.clobTokenIds === 'string'
+              ? JSON.parse(market.clobTokenIds)
+              : market.clobTokenIds;
+            // YES = index 0, NO = index 1
+            const isYes = pos.outcome.toUpperCase() === 'YES';
+            tokenId = tokenIds[isYes ? 0 : 1];
+          }
+
+          // Get current price from outcomePrices
+          if (market.outcomePrices) {
+            const prices = typeof market.outcomePrices === 'string'
+              ? JSON.parse(market.outcomePrices)
+              : market.outcomePrices;
+            const isYes = pos.outcome.toUpperCase() === 'YES';
+            currentPrice = parseFloat(prices[isYes ? 0 : 1]) || pos.avgPrice;
+          }
+        }
       } catch (e) {
-        console.warn('Could not fetch current price, using avg price');
+        console.warn(`[SNIPE] Could not fetch market data for ${pos.conditionId}, using avg price`);
+      }
+
+      // Place real order if not in paper mode and we have a token ID
+      let orderId: string | null = null;
+      if (!isPaperMode && tokenId) {
+        try {
+          // Ensure polymarket service is initialized
+          if (!polymarketService.isInitialized()) {
+            await polymarketService.initialize();
+          }
+
+          // Place market order (buy at best available price)
+          const orderResult = await polymarketService.placeMarketOrder(tokenId, 'BUY', snipeSize);
+          orderId = orderResult.orderID;
+          console.log(`[SNIPE][LIVE] Order placed: ${orderId}`);
+        } catch (orderError: any) {
+          console.error(`[SNIPE] Failed to place real order:`, orderError.message);
+          // Continue to record the position anyway (will be tracked as paper trade)
+        }
+      } else if (!isPaperMode && !tokenId) {
+        console.warn(`[SNIPE] No token ID for ${pos.title} - cannot place live order`);
       }
 
       // Create the sniped position
       queries.addSnipedPosition.run(
         pos.conditionId,
-        null, // token_id - would need to fetch
+        tokenId,
         pos.title,
         pos.slug || pos.eventSlug,
         pos.outcome,
@@ -149,7 +199,7 @@ class SnipeService {
         pos.sourceTrader,
         pos.sourceTraderName,
         profitTarget,
-        isPaperMode ? 1 : 0
+        isPaperMode || !orderId ? 1 : 0 // paper trade if no real order was placed
       );
 
       // Track spent amount in budget
@@ -162,9 +212,12 @@ class SnipeService {
         entryPrice: currentPrice,
         size: snipeSize,
         sourceTrader: pos.sourceTraderName,
+        orderId: orderId,
+        isPaperTrade: isPaperMode || !orderId,
       });
 
-      console.log(`[SNIPE] Copied position: ${pos.title.slice(0, 40)}... ${pos.outcome} @ $${currentPrice.toFixed(3)}`);
+      const modeLabel = isPaperMode || !orderId ? '[PAPER]' : '[LIVE]';
+      console.log(`[SNIPE]${modeLabel} Copied position: ${pos.title.slice(0, 40)}... ${pos.outcome} @ $${currentPrice.toFixed(3)}`);
 
       io.emit('snipe:copied', {
         title: pos.title,
@@ -172,7 +225,11 @@ class SnipeService {
         entryPrice: currentPrice,
         size: snipeSize,
         sourceTrader: pos.sourceTraderName,
+        isPaperTrade: isPaperMode || !orderId,
       });
+
+      // Small delay between orders to avoid rate limiting
+      await this.sleep(500);
     }
 
     return { copied, skipped, positions: copiedPositions };
@@ -183,6 +240,8 @@ class SnipeService {
    */
   async checkAndClosePositions(): Promise<{ checked: number; closed: number }> {
     const openPositions: any[] = queries.getOpenSnipedPositions.all();
+    const appConfig: any = queries.getAppConfig.get();
+    const isPaperMode = appConfig?.paper_trading_mode === 1;
     let checked = 0;
     let closed = 0;
 
@@ -190,13 +249,12 @@ class SnipeService {
       checked++;
 
       try {
-        // Get current price - for paper trading, simulate price movement
+        // Get current price and token ID from Gamma API
         let currentPrice = pos.entry_price;
+        let tokenId = pos.token_id;
 
-        // Try to get real price from Gamma API
         try {
-          // Use condition ID to look up market
-          const marketRes = await axios.get(`https://gamma-api.polymarket.com/markets`, {
+          const marketRes = await axios.get(`${GAMMA_API_BASE}/markets`, {
             params: { condition_id: pos.condition_id, limit: 1 },
           });
 
@@ -207,9 +265,17 @@ class SnipeService {
               : market.outcomePrices;
 
             if (prices && prices.length >= 2) {
-              // outcomeIndex 0 = YES, 1 = NO typically
-              const isYes = pos.outcome.toUpperCase() === 'YES' || pos.outcome_index === 0;
+              const isYes = pos.outcome.toUpperCase() === 'YES';
               currentPrice = parseFloat(prices[isYes ? 0 : 1]) || pos.entry_price;
+            }
+
+            // Fetch token ID if we don't have it
+            if (!tokenId && market.clobTokenIds) {
+              const tokenIds = typeof market.clobTokenIds === 'string'
+                ? JSON.parse(market.clobTokenIds)
+                : market.clobTokenIds;
+              const isYes = pos.outcome.toUpperCase() === 'YES';
+              tokenId = tokenIds[isYes ? 0 : 1];
             }
           }
         } catch (e) {
@@ -231,13 +297,35 @@ class SnipeService {
           const shares = pos.size / pos.entry_price;
           const realizedPnl = (shares * currentPrice) - pos.size;
 
+          // Place real sell order if not paper trade and we have token ID
+          let sellOrderId: string | null = null;
+          const isRealTrade = !pos.is_paper_trade && !isPaperMode;
+
+          if (isRealTrade && tokenId) {
+            try {
+              if (!polymarketService.isInitialized()) {
+                await polymarketService.initialize();
+              }
+
+              // Sell shares - for market order, we pass the value we're selling
+              const sellValue = shares * currentPrice;
+              const orderResult = await polymarketService.placeMarketOrder(tokenId, 'SELL', sellValue);
+              sellOrderId = orderResult.orderID;
+              console.log(`[SNIPE][LIVE] Sell order placed: ${sellOrderId}`);
+            } catch (sellError: any) {
+              console.error(`[SNIPE] Failed to place sell order:`, sellError.message);
+              // Continue to close the position record even if sell fails
+            }
+          }
+
           queries.closeSnipedPosition.run(currentPrice, realizedPnl, pos.id);
           closed++;
 
-          // Update budget with realized P&L (this shows in dashboard)
+          // Update budget with realized P&L
           await riskService.updateBudget(0, realizedPnl);
 
-          console.log(`[SNIPE] Closed position: ${pos.title.slice(0, 40)}... +${(pnlPct * 100).toFixed(1)}% P&L: $${realizedPnl.toFixed(2)}`);
+          const modeLabel = isRealTrade ? '[LIVE]' : '[PAPER]';
+          console.log(`[SNIPE]${modeLabel} Closed position: ${pos.title.slice(0, 40)}... +${(pnlPct * 100).toFixed(1)}% P&L: $${realizedPnl.toFixed(2)}`);
 
           io.emit('snipe:closed', {
             id: pos.id,
@@ -247,6 +335,8 @@ class SnipeService {
             exitPrice: currentPrice,
             pnlPct: pnlPct * 100,
             realizedPnl,
+            sellOrderId,
+            isPaperTrade: !isRealTrade,
           });
         }
       } catch (error) {
